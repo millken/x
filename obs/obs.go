@@ -2,178 +2,167 @@ package obs
 
 import (
 	"fmt"
-	"math/rand"
+	"math/rand/v2"
 	"strings"
-	"time"
 )
 
-type OP uint
+// TableSize 必须是 256，涵盖 byte 的所有取值
+const TableSize = 256
+
+// Operation 定义混淆支持的算子
+type Operation int
 
 const (
-	OP_MUL_DIV OP = 1 << iota // 乘除法
-	OP_MOD                    // 取模
-	OP_XOR                    // 异或
-	OP_SHIFT                  // 位移，根据输入的值，当值>128时，进行右移，否则左移
+	OpAdd Operation = iota
+	OpSub
+	OpXor
+	OpRol // 循环左移
+	OpRor // 循环右移
 )
 
-func opN(a, b uint8, op OP) (r1 string, r2 []uint8) {
-	var shiftFn = func(a uint8) uint8 {
-		var b uint8
-		if a > 128 {
-			b = maxRightShift(a)
-		} else {
-			b = maxLeftShift(a)
-		}
-		return rnd(b)
-	}
-	var shbit = shiftFn(a)
-	var mid uint8
-	r2 = []uint8{a}
-	if op&OP_SHIFT != 0 {
-		r2 = append(r2, shbit)
-		if a > 128 {
-			mid = a >> shbit
-			r1 = "%s>>%s"
-		} else {
-			mid = a << shbit
-			r1 = "%s<<%s"
-		}
-	}
-	if op&OP_XOR != 0 {
-		xor := uint8(rand.Intn(256))
-		r2 = append(r2, xor)
-		mid = mid ^ xor
-		r1 = fmt.Sprintf("%s ^ %%s", r1)
-	}
-	if op&OP_MOD != 0 && mid > 128 {
-		mod := uint8(rand.Intn(128))
-		r2 = append(r2, mod)
-		mid = mid % mod
-		r1 = fmt.Sprintf("(%s) %%%% %%s", r1)
-	}
-	if mid == b {
-		return
-	}
-	if mid > b {
-		t1 := mid - b
-		r2 = append(r2, t1)
-		r1 = fmt.Sprintf("%s-%%s", r1)
-	} else {
-		t1 := b - mid
-		r2 = append(r2, t1)
-		r1 = fmt.Sprintf("%s+%%s", r1)
-	}
-	return
-}
-
-func maxLeftShift(value uint8) uint8 {
-	maxShift := uint8(0)
-	for i := uint8(1); i < 8; i++ {
-		if uint16(value)<<i <= 255 {
-			maxShift = i
-		} else {
-			break
-		}
-	}
-	return maxShift
-}
-
-func maxRightShift(value uint8) uint8 {
-	maxShift := uint8(0)
-	for i := uint8(1); i < 8; i++ {
-		if value>>i > 0 {
-			maxShift = i
-		} else {
-			break
-		}
-	}
-	return maxShift
-}
-
-func formatAsciiTable(ascii [0xff]byte) string {
-	result := "[0xff]byte{"
-	for i, v := range ascii {
-		if i > 0 {
-			result += ", "
-		}
-		result += fmt.Sprintf("0x%02x", v)
-	}
-	result += "}"
-	return result
-}
-func shulffedAsciiTable() [0xff]byte {
-	var ascii [0xff]byte
-	for i := 0x00; i < 0xff; i++ {
+// shulffedAsciiTable 生成全排列的混淆表
+func shulffedAsciiTable() [TableSize]byte {
+	var ascii [TableSize]byte
+	for i := 0; i < TableSize; i++ {
 		ascii[i] = byte(i)
 	}
 
-	// 洗牌函数
-	shuffle := func(arr *[0xff]byte) {
-		for i := 0x7F; i > 0; i-- {
-			j := rnd(uint8(i))
-			arr[i], arr[j] = arr[j], arr[i]
-		}
+	// Shuffle 在 v2 中更加方便，或者手动实现
+	for i := TableSize - 1; i > 0; i-- {
+		// v2 使用 rand.IntN (注意大写N)
+		j := rand.IntN(i + 1)
+		ascii[i], ascii[j] = ascii[j], ascii[i]
 	}
-
-	// 多次洗牌
-	for i := 0; i < 5; i++ {
-		shuffle(&ascii)
-	}
-
-	// 应用不同的位运算进行进一步混淆
-	for i := 0x00; i < 0xff; i++ {
-		ascii[i] = (ascii[i] ^ 0x55) + 0x33
-		ascii[i] = (ascii[i] << 1) | (ascii[i] >> 7)
-	}
-
 	return ascii
 }
-func rnd(n uint8) uint8 {
-	rand.NewSource(time.Now().UnixNano())
-	return uint8(rand.Intn(int(n) + 1))
+
+// ExprBuilder 用于构建和跟踪表达式状态
+type ExprBuilder struct {
+	currentVal byte   // 当前内存中模拟计算的值 (always wrapped)
+	exprStr    string // 当前生成的代码字符串
+	lookupFunc func(byte) string
 }
 
-func GenerateByTable(old string) string {
-	var a = shulffedAsciiTable()
-	var b = make(map[uint8]byte, 0xff)
-	for i := uint8(0); i < 0xff; i++ {
-		b[a[i]] = i
+func NewExprBuilder(startVal byte, lookup func(byte) string) *ExprBuilder {
+	return &ExprBuilder{
+		currentVal: startVal,
+		exprStr:    lookup(startVal),
+		lookupFunc: lookup,
 	}
-	var c []string
-	for _, v := range old {
-		vv := uint8(v)
-		r1 := rnd(0xff)
-		o1, o2 := opN(r1, vv, OP_SHIFT|OP_XOR|OP_MOD)
-		s0 := make([]any, len(o2))
-		for i, v := range o2 {
-			s0[i] = fmt.Sprintf("a[%d]", b[v])
-		}
-		s1 := fmt.Sprintf(o1, s0...)
-		c = append(c, s1)
-	}
-	s := fmt.Sprintf(`var a=%s
-	   return string([]byte{%s})`, formatAsciiTable(a), strings.Join(c, ", "))
-	return s
 }
 
-func GenerateCode(old string) string {
-	var a = shulffedAsciiTable()
-	var b = make(map[uint8]byte, 0xff)
-	for i := uint8(0); i < 0xff; i++ {
-		b[a[i]] = i
+// Apply 随机应用一个操作
+func (e *ExprBuilder) Apply() {
+	op := Operation(rand.IntN(5)) // rand.IntN
+	operand := byte(rand.IntN(256))
+
+	// 为了避免生成出的代码太长，operand 我们也通过 lookup 转换（也可以直接用 hex）
+	opStr := e.lookupFunc(operand)
+
+	switch op {
+	case OpAdd:
+		e.currentVal += operand
+		// 关键修复：强制 & 0xFF 确保常量运算也遵循 byte wrapping，防止 overflow 错误
+		e.exprStr = fmt.Sprintf("((%s + %s) & 0xFF)", e.exprStr, opStr)
+	case OpSub:
+		e.currentVal -= operand
+		e.exprStr = fmt.Sprintf("((%s - %s) & 0xFF)", e.exprStr, opStr)
+	case OpXor:
+		e.currentVal ^= operand
+		e.exprStr = fmt.Sprintf("((%s ^ %s) & 0xFF)", e.exprStr, opStr)
+	case OpRol:
+		// 限制位移位数 1-7
+		shift := operand%7 + 1
+		opStr = fmt.Sprintf("%d", shift)
+
+		// 模拟循环左移
+		e.currentVal = (e.currentVal << shift) | (e.currentVal >> (8 - shift))
+		// 在 ROL 之后也必须 mask，因为左移操作符对常量可能会产生大数
+		e.exprStr = fmt.Sprintf("(((%s<<%s)|(%s>>(8-%s))) & 0xFF)", e.exprStr, opStr, e.exprStr, opStr)
+	case OpRor:
+		shift := operand%7 + 1
+		opStr = fmt.Sprintf("%d", shift)
+
+		e.currentVal = (e.currentVal >> shift) | (e.currentVal << (8 - shift))
+		e.exprStr = fmt.Sprintf("(((%s>>%s)|(%s<<(8-%s))) & 0xFF)", e.exprStr, opStr, e.exprStr, opStr)
 	}
-	var c []string
-	for _, v := range old {
-		vv := uint8(v)
-		r1 := rnd(0xff)
-		o1, o2 := opN(r1, vv, OP_SHIFT|OP_XOR|OP_MOD)
-		s0 := make([]any, len(o2))
-		for i, v := range o2 {
-			s0[i] = fmt.Sprintf("0x%02x", a[b[v]]) //如果输出十六进制，可以使用%d
-		}
-		s1 := fmt.Sprintf(o1, s0...)
-		c = append(c, s1)
+}
+
+// Finalize 计算差值并闭合表达式，使其结果等于 target
+func (e *ExprBuilder) Finalize(target byte) string {
+	// 计算达到 target 需要的差值
+	diff := target - e.currentVal
+
+	// 最后补上一刀加法，同样需要 mask
+	return fmt.Sprintf("byte(((%s + %s) & 0xFF))", e.exprStr, e.lookupFunc(diff))
+}
+
+// generateObfuscatedByte 核心逻辑：为一个目标字节��成一串复杂的运算代码
+func generateObfuscatedByte(target byte, lookup func(byte) string) string {
+	start := byte(rand.IntN(256))
+	builder := NewExprBuilder(start, lookup)
+
+	steps := rand.IntN(5) + 3 // 3-7 步随机操作
+	for i := 0; i < steps; i++ {
+		builder.Apply()
 	}
-	s := fmt.Sprintf(`[]byte{%s}`, strings.Join(c, ", "))
-	return s
+
+	return builder.Finalize(target)
+}
+
+// GenerateByTable 生成带查找表的完整代码
+func GenerateByTable(plainText string) string {
+	table := shulffedAsciiTable()
+
+	valToIndex := make(map[byte]int)
+	for i, v := range table {
+		valToIndex[v] = i
+	}
+
+	lookupFn := func(v byte) string {
+		idx := valToIndex[v]
+		return fmt.Sprintf("a[%d]", idx)
+	}
+
+	var codeParts []string
+	for i := 0; i < len(plainText); i++ {
+		b := plainText[i]
+		code := generateObfuscatedByte(b, lookupFn)
+		codeParts = append(codeParts, code)
+	}
+
+	tableStr := formatTable(table)
+
+	return fmt.Sprintf(`
+	// Obfuscated String Block
+	func() string {
+		a := %s
+		return string([]byte{
+			%s,
+		})
+	}()`, tableStr, strings.Join(codeParts, ",\n\t\t\t"))
+}
+
+// GenerateCode 仅生成字节切片内容
+func GenerateCode(plainText string) string {
+	lookupFn := func(v byte) string {
+		return fmt.Sprintf("0x%02x", v)
+	}
+
+	var codeParts []string
+	for i := 0; i < len(plainText); i++ {
+		b := plainText[i]
+		code := generateObfuscatedByte(b, lookupFn)
+		codeParts = append(codeParts, code)
+	}
+
+	return fmt.Sprintf("[]byte{\n\t%s,\n}", strings.Join(codeParts, ",\n\t"))
+}
+
+func formatTable(table [TableSize]byte) string {
+	var parts []string
+	for _, v := range table {
+		parts = append(parts, fmt.Sprintf("0x%02x", v))
+	}
+	return fmt.Sprintf("[%d]byte{%s}", TableSize, strings.Join(parts, ", "))
 }
